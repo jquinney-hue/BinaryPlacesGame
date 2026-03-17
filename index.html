@@ -8,6 +8,8 @@
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700;800&display=swap');
         
@@ -133,10 +135,13 @@
             localStorage.setItem(key, JSON.stringify(stored.slice(0, 5)));
         };
 
-        const saveExamResult = (score, total, time) => {
+        // Notice the new 'details' parameter defaulting to an empty array
+        const saveExamResult = (score, total, time, details = []) => {
             const key = 'binaryGame_exam_history';
             const stored = JSON.parse(localStorage.getItem(key) || '[]');
-            stored.push({ score, total, time, date: new Date().toISOString() });
+            // Add 'details' to the saved object
+            stored.push({ score, total, time, details, date: new Date().toISOString() });
+            
             if (stored.length > 10) stored.shift(); 
             localStorage.setItem(key, JSON.stringify(stored));
         };
@@ -157,12 +162,15 @@
 
         const getDailyStats = () => {
             const log = JSON.parse(localStorage.getItem('binaryGame_activity_log') || '[]');
+            // Pull from the actual exam history storage
+            const allExams = JSON.parse(localStorage.getItem('binaryGame_exam_history') || '[]'); 
+            
             const today = new Date().toLocaleDateString();
             
             const stats = {};
             let totalTime = 0;
-            const examHistory = []; 
 
+            // 1. Process standard activity log
             log.forEach(entry => {
                 if (new Date(entry.timestamp).toLocaleDateString() === today) {
                     if (!stats[entry.level]) {
@@ -175,12 +183,13 @@
                     stats[entry.level].wrong += entry.wrong;
                     
                     totalTime += entry.duration;
-
-                    if (entry.level === 10) {
-                        examHistory.push(entry);
-                    }
                 }
             });
+
+            // 2. Process exam history correctly
+            const examHistory = allExams.filter(entry => 
+                new Date(entry.date).toLocaleDateString() === today
+            );
 
             return { stats, totalTime, examHistory };
         };
@@ -195,98 +204,175 @@
             return `${m}m ${s}s`;
         };
 
-        // --- REPORT GENERATOR ---
-        const generateReportImage = (name, dailyData) => {
+        const generateReportPDF = (name, dailyData) => {
             const { stats, totalTime, examHistory } = dailyData;
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
-            const width = 850;
-            const height = 850;
-            canvas.width = width;
-            canvas.height = height;
-
-            ctx.fillStyle = '#f8fafc'; ctx.fillRect(0, 0, width, height);
-            ctx.fillStyle = '#0f172a'; ctx.fillRect(0, 0, width, 110);
-            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 32px monospace'; ctx.textAlign = 'left';
-            ctx.fillText('Binary Blitz Report', 40, 65);
-
-            ctx.textAlign = 'right'; ctx.font = '20px monospace'; ctx.fillStyle = '#94a3b8';
-            ctx.fillText(`Play Time: ${formatTime(totalTime)}`, 810, 65);
-
-            ctx.textAlign = 'left'; ctx.fillStyle = '#0f172a'; ctx.font = 'bold 24px sans-serif';
-            ctx.fillText(`Student: ${name}`, 40, 160);
             
-            ctx.textAlign = 'right'; ctx.fillStyle = '#64748b'; ctx.font = '16px sans-serif';
-            ctx.fillText(new Date().toLocaleDateString(), 810, 160);
+            // Initialize jsPDF
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF();
+            const pageWidth = doc.internal.pageSize.getWidth();
 
-            let y = 210;
-            ctx.textAlign = 'left'; ctx.fillStyle = '#334155'; ctx.font = 'bold 16px monospace';
-            const cols = { level: 40, plays: 280, score: 360, solved: 480, faults: 580, acc: 680, time: 750 };
-            ctx.fillText('LEVEL', cols.level, y); ctx.fillText('PLAYS', cols.plays, y); ctx.fillText('BEST', cols.score, y);
-            ctx.fillText('SOLVED', cols.solved, y); ctx.fillText('FAULTS', cols.faults, y); ctx.fillText('ACC%', cols.acc, y);
-            ctx.textAlign = 'right'; ctx.fillText('TIME', 810, y);
+            // --- HEADER ---
+            doc.setFillColor(15, 23, 42); // #0f172a
+            doc.rect(0, 0, pageWidth, 30, 'F');
             
-            ctx.beginPath(); ctx.moveTo(40, y + 10); ctx.lineTo(810, y + 10); ctx.strokeStyle = '#cbd5e1'; ctx.stroke();
-            y += 40; ctx.font = '16px monospace'; ctx.textAlign = 'left';
+            doc.setTextColor(255, 255, 255);
+            doc.setFont("courier", "bold");
+            doc.setFontSize(22);
+            doc.text('Binary Blitz Report', 14, 21);
 
+            doc.setTextColor(148, 163, 184);
+            doc.setFontSize(12);
+            doc.text(`Play Time: ${formatTime(totalTime)}`, pageWidth - 14, 20, { align: 'right' });
+
+            // --- STUDENT INFO ---
+            doc.setTextColor(15, 23, 42);
+            doc.setFont("helvetica", "bold");
+            doc.setFontSize(16);
+            doc.text(`Student: ${name}`, 14, 45);
+
+            doc.setTextColor(100, 116, 139);
+            doc.setFont("helvetica", "normal");
+            doc.setFontSize(12);
+            doc.text(new Date().toLocaleDateString(), pageWidth - 14, 45, { align: 'right' });
+
+            // --- STATS TABLE ---
+            // Format the data for autoTable
+            const tableData = [];
             Object.entries(LEVELS).forEach(([id, data]) => {
                 if (id === '10') return; 
                 const stat = stats[id] || { plays: 0, best: 0, time: 0, correct: 0, wrong: 0 };
-                if (parseInt(id) % 2 === 0) { ctx.fillStyle = '#f1f5f9'; ctx.fillRect(30, y - 25, 790, 35); }
                 const totalAttempts = stat.correct + stat.wrong;
                 const accuracy = totalAttempts > 0 ? Math.round((stat.correct / totalAttempts) * 100) : '-';
-                ctx.fillStyle = '#0f172a'; ctx.fillText(`${id}. ${data.title}`, cols.level, y);
-                ctx.fillStyle = stat.plays > 0 ? '#0f172a' : '#94a3b8'; ctx.fillText(stat.plays.toString(), cols.plays, y);
-                ctx.fillStyle = stat.best > 0 ? '#16a34a' : '#94a3b8'; ctx.fillText(stat.best.toString(), cols.score, y);
-                ctx.fillStyle = '#0f172a'; ctx.fillText(stat.correct.toString(), cols.solved, y);
-                ctx.fillStyle = stat.wrong > 0 ? '#ef4444' : '#0f172a'; ctx.fillText(stat.wrong.toString(), cols.faults, y);
-                ctx.fillStyle = accuracy === '-' ? '#94a3b8' : (accuracy >= 80 ? '#16a34a' : '#ef4444'); ctx.fillText(accuracy === '-' ? '-' : `${accuracy}%`, cols.acc, y);
-                ctx.textAlign = 'right'; ctx.fillStyle = stat.time > 0 ? '#2563eb' : '#94a3b8'; ctx.fillText(formatTime(stat.time), 810, y);
-                ctx.textAlign = 'left'; y += 35;
+                
+                tableData.push([
+                    `${id}. ${data.title}`,
+                    stat.plays || '-',
+                    stat.best || '-',
+                    stat.correct,
+                    stat.wrong || '-',
+                    accuracy === '-' ? '-' : `${accuracy}%`,
+                    stat.time > 0 ? formatTime(stat.time) : '-'
+                ]);
             });
 
-            y += 20;
-            ctx.fillStyle = '#f43f5e';
-            ctx.fillRect(0, y, width, 40);
-            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 20px monospace'; ctx.fillText('FINAL EXAM STATUS', 40, y + 27);
-            y += 60;
-            
-            const history = getExamHistory(); // Use the getter which reads from local storage
-            // Filter to ensure we only show today's exams if strict daily report? 
-            // The prompt said "Reports should only include data from the date it was created".
-            // However, exam history might be relevant across days? 
-            // For now, let's filter exam history to today as well to be consistent.
-            const todaysExams = examHistory.filter(e => new Date(e.date).toLocaleDateString() === new Date().toLocaleDateString());
+            doc.autoTable({
+                startY: 55,
+                head: [['LEVEL', 'PLAYS', 'BEST', 'SOLVED', 'FAULTS', 'ACC%', 'TIME']],
+                body: tableData,
+                theme: 'striped',
+                headStyles: { fillColor: [51, 65, 85], font: 'courier' }, // #334155
+                styles: { font: 'courier', fontSize: 10, textColor: [15, 23, 42] },
+                columnStyles: {
+                    6: { halign: 'right' } // Align 'TIME' to the right
+                }
+            });
 
+            // --- EXAM STATUS ---
+            let finalY = doc.lastAutoTable.finalY + 15; // Start below the table
+            
+            doc.setFillColor(244, 63, 94); // #f43f5e
+            doc.rect(0, finalY, pageWidth, 15, 'F');
+            doc.setTextColor(255, 255, 255);
+            doc.setFont("courier", "bold");
+            doc.setFontSize(14);
+            doc.text('FINAL EXAM STATUS', 14, finalY + 10);
+
+            finalY += 25;
+
+            // Exam Data Logic
+            const todaysExams = examHistory.filter(e => 
+                new Date(e.date).toLocaleDateString() === new Date().toLocaleDateString()
+            );
             const latest = todaysExams.length > 0 ? todaysExams[todaysExams.length - 1] : null;
             const previous = todaysExams.length > 1 ? todaysExams[todaysExams.length - 2] : null;
 
-            ctx.fillStyle = '#0f172a'; ctx.font = '18px sans-serif';
-            ctx.fillText('Most Recent Attempt (Today):', 40, y);
+            // Latest Attempt
+            doc.setTextColor(15, 23, 42);
+            doc.setFont("helvetica", "normal");
+            doc.text('Most Recent Attempt (Today):', 14, finalY);
+            
             if (latest) {
-                ctx.fillStyle = '#16a34a'; ctx.font = 'bold 18px monospace';
-                ctx.fillText(`${latest.score} / ${latest.total}`, 300, y);
-                ctx.fillStyle = '#64748b'; ctx.font = '16px monospace';
-                ctx.fillText(`(${formatTime(latest.time)})`, 400, y);
+                doc.setTextColor(22, 163, 74); // #16a34a
+                doc.setFont("courier", "bold");
+                doc.text(`${latest.score} / ${latest.total}`, 90, finalY);
+                doc.setTextColor(100, 116, 139); // #64748b
+                doc.setFont("courier", "normal");
+                doc.text(`(${formatTime(latest.time)})`, 120, finalY);
             } else {
-                ctx.fillStyle = '#94a3b8'; ctx.font = 'italic 18px sans-serif'; ctx.fillText('Not yet attempted today', 300, y);
+                doc.setTextColor(148, 163, 184); // #94a3b8
+                doc.setFont("helvetica", "italic");
+                doc.text('Not yet attempted today', 90, finalY);
             }
 
-            y += 40;
-            ctx.fillStyle = '#0f172a'; ctx.font = '18px sans-serif';
-            ctx.fillText('Previous Attempt (Today):', 40, y);
-             if (previous) {
-                ctx.fillStyle = '#334155'; ctx.font = 'bold 18px monospace';
-                ctx.fillText(`${previous.score} / ${previous.total}`, 300, y);
-                ctx.fillStyle = '#64748b'; ctx.font = '16px monospace';
-                ctx.fillText(`(${formatTime(previous.time)})`, 400, y);
+            finalY += 12;
+
+            // Previous Attempt
+            doc.setTextColor(15, 23, 42);
+            doc.setFont("helvetica", "normal");
+            doc.text('Previous Attempt (Today):', 14, finalY);
+            
+            if (previous) {
+                doc.setTextColor(51, 65, 85); // #334155
+                doc.setFont("courier", "bold");
+                doc.text(`${previous.score} / ${previous.total}`, 90, finalY);
+                doc.setTextColor(100, 116, 139);
+                doc.setFont("courier", "normal");
+                doc.text(`(${formatTime(previous.time)})`, 120, finalY);
             } else {
-                ctx.fillStyle = '#94a3b8'; ctx.font = 'italic 18px sans-serif'; ctx.fillText('-', 300, y);
+                doc.setTextColor(148, 163, 184);
+                doc.setFont("helvetica", "italic");
+                doc.text('-', 90, finalY);
             }
 
-            return canvas.toDataURL('image/png');
+            // --- DETAILED EXAM BREAKDOWN (PAGE 2) ---
+            if (latest && latest.details && latest.details.length > 0) {
+                doc.addPage(); 
+                
+                // Page 2 Header
+                doc.setFillColor(244, 63, 94); // Red theme for exam
+                doc.rect(0, 0, pageWidth, 25, 'F');
+                doc.setTextColor(255, 255, 255);
+                doc.setFont("courier", "bold");
+                doc.setFontSize(16);
+                doc.text('FINAL EXAM DETAILED BREAKDOWN', 14, 17);
+
+                // Map the details state to AutoTable rows
+                const breakdownData = latest.details.map(d => [
+                    `Q${d.questionNum}`,
+                    d.type,
+                    d.userAnswer,
+                    d.correctAnswer,
+                    d.isCorrect ? 'Correct' : 'Incorrect'
+                ]);
+
+                doc.autoTable({
+                    startY: 35,
+                    head: [['#', 'Question Type', 'Your Answer', 'Correct Answer', 'Result']],
+                    body: breakdownData,
+                    theme: 'grid',
+                    headStyles: { fillColor: [51, 65, 85], font: 'courier' }, 
+                    styles: { font: 'courier', fontSize: 10 },
+                    columnStyles: {
+                        0: { cellWidth: 15 },
+                        4: { fontStyle: 'bold' } 
+                    },
+                    // Hook to color-code the Result column text
+                    didParseCell: function(data) {
+                        if (data.section === 'body' && data.column.index === 4) {
+                            if (data.cell.raw === 'Correct') {
+                                data.cell.styles.textColor = [22, 163, 74]; // Green
+                            } else {
+                                data.cell.styles.textColor = [239, 68, 68]; // Red
+                            }
+                        }
+                    }
+                });
+            }
+
+            // --- OUTPUT ---
+            doc.save(`${name.replace(/\s+/g, '_')}_Binary_Blitz_Report.pdf`);
         };
-
         // --- GAME LOOP ---
         const useGameLoop = (active, onGameOver, isHardMode, timeMultiplier = 1) => {
             const [stress, setStress] = useState(0);
@@ -358,22 +444,34 @@
 
         const ExportModal = ({ onClose }) => {
             const [name, setName] = useState("");
+            
             const handleExport = () => {
                 if (!name.trim()) return;
                 const dailyData = getDailyStats();
-                const dataUrl = generateReportImage(name, dailyData);
-                const link = document.createElement('a');
-                link.download = `BinaryBlitz_Report_${name.replace(/\s+/g, '_')}.png`;
-                link.href = dataUrl;
-                link.click();
+                
+                // jsPDF handles the file creation and download automatically!
+                generateReportPDF(name, dailyData);
+                
+                // Just close the modal after triggering the PDF generation
                 onClose();
             };
+
             return (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 fade-in">
                     <div className="bg-slate-800 border border-slate-600 rounded-2xl max-w-md w-full p-6 shadow-2xl">
                         <h2 className="text-2xl font-bold text-white mb-4">Export Session Report</h2>
-                        <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Student Name" className="w-full p-3 bg-slate-900 border border-slate-700 rounded-lg text-white mb-6 focus:outline-none focus:border-blue-500" autoFocus />
-                        <div className="flex gap-3"><Button onClick={onClose} variant="secondary" className="flex-1">Cancel</Button><Button onClick={handleExport} disabled={!name.trim()} variant="success" className="flex-1">Download PNG</Button></div>
+                        <input 
+                            type="text" 
+                            value={name} 
+                            onChange={(e) => setName(e.target.value)} 
+                            placeholder="Student Name" 
+                            className="w-full p-3 bg-slate-900 border border-slate-700 rounded-lg text-white mb-6 focus:outline-none focus:border-blue-500" 
+                            autoFocus 
+                        />
+                        <div className="flex gap-3">
+                            <Button onClick={onClose} variant="secondary" className="flex-1">Cancel</Button>
+                            <Button onClick={handleExport} disabled={!name.trim()} variant="success" className="flex-1">Download PDF</Button>
+                        </div>
                     </div>
                 </div>
             );
@@ -631,6 +729,9 @@
             const [userBits, setUserBits] = useState([]);
             const [carryBits, setCarryBits] = useState([]);
             const [sel, setSel] = useState(null); 
+            // Add this to your state declarations at the top of ExamLevel
+            const [examDetails, setExamDetails] = useState([]);
+            
 
             useEffect(() => {
                 const qs = [];
@@ -663,24 +764,69 @@
                 }
             };
 
+            // Replace your existing handleNext function with this one:
             const handleNext = () => {
                 const q = questions[currentQIndex];
                 let isCorrect = false;
-                if ((q.levelType === 1 || q.levelType === 2) && parseInt(input) === POWERS[sel]) isCorrect = true;
-                if (q.levelType === 3) { if(userBits.reduce((a,b,i)=>a+(b*POWERS[i]),0) === q.decimal) isCorrect = true; }
-                if ((q.levelType === 4 || q.levelType === 6) && parseInt(input) === q.decimal) isCorrect = true;
-                if (q.levelType === 5) { if(parseInt(userBits.join(''), 2) === parseInt(q.binResult.join(''), 2)) isCorrect = true; }
-                if ((q.levelType === 7 || q.levelType === 8) && input === q.hexString) isCorrect = true;
-                if (q.levelType === 9) { if(userBits.reduce((a,b,i)=>a+(b*POWERS[i]),0) === q.decimal) isCorrect = true; }
+                
+                // Variables to track for the report
+                let uAns = input === "" ? "None" : input;
+                let cAns = "";
+                let qType = "";
+
+                // Determine correctness and format the text for the report
+                if (q.levelType === 1 || q.levelType === 2) {
+                    isCorrect = parseInt(input) === POWERS[sel];
+                    cAns = POWERS[sel].toString();
+                    qType = "Missing Place Value";
+                } else if (q.levelType === 3) {
+                    isCorrect = userBits.reduce((a,b,i) => a + (b * POWERS[i]), 0) === q.decimal;
+                    uAns = userBits.join('');
+                    cAns = q.decimal.toString(2).padStart(8, '0'); 
+                    qType = `Make Decimal: ${q.decimal}`;
+                } else if (q.levelType === 4 || q.levelType === 6) {
+                    isCorrect = parseInt(input) === q.decimal;
+                    cAns = q.decimal.toString();
+                    qType = q.levelType === 4 ? "Bin to Dec" : "Hex to Dec";
+                } else if (q.levelType === 5) {
+                    isCorrect = parseInt(userBits.join(''), 2) === parseInt(q.binResult.join(''), 2);
+                    uAns = userBits.join('');
+                    cAns = q.binResult.join('');
+                    qType = "Binary Sum";
+                } else if (q.levelType === 7 || q.levelType === 8) {
+                    isCorrect = input.toUpperCase() === q.hexString.toUpperCase();
+                    cAns = q.hexString;
+                    qType = q.levelType === 7 ? "Dec to Hex" : "Bin to Hex";
+                    uAns = uAns.toUpperCase();
+                } else if (q.levelType === 9) {
+                    isCorrect = userBits.reduce((a,b,i) => a + (b * POWERS[i]), 0) === q.decimal;
+                    uAns = userBits.join('');
+                    cAns = q.decimal.toString(2).padStart(8, '0');
+                    qType = `Hex to Bin: ${q.hexString}`;
+                }
 
                 if (isCorrect) setCorrectCount(prev => prev + 1);
 
+                // Record the question details
+                const currentDetail = {
+                    questionNum: currentQIndex + 1,
+                    type: qType,
+                    userAnswer: uAns,
+                    correctAnswer: cAns,
+                    isCorrect: isCorrect
+                };
+                
+                const newDetails = [...examDetails, currentDetail];
+                setExamDetails(newDetails);
+
+                // Proceed to next or finish
                 if (currentQIndex < 14) {
                     setCurrentQIndex(prev => prev + 1);
                     setupQuestionState(questions[currentQIndex + 1]);
                 } else {
                     const duration = Date.now() - startTimeRef.current;
-                    onFinish(correctCount + (isCorrect ? 1 : 0), 15, duration);
+                    // Pass the newDetails array out via onFinish!
+                    onFinish(correctCount + (isCorrect ? 1 : 0), 15, duration, newDetails);
                 }
             };
 
@@ -809,8 +955,11 @@
                 setView('menu'); 
             };
 
-            const handleExamFinish = (score, total, duration) => {
-                saveExamResult(score, total, duration);
+            // 1. Add 'details' to the parameters here
+            const handleExamFinish = (score, total, duration, details) => {
+                // 2. Pass 'details' into your save function
+                saveExamResult(score, total, duration, details);
+                
                 saveActivity(10, score, duration, score, total - score);
                 updateStats(10, score, duration, score, total - score); 
                 setLastExamStats({ score, total, duration });
